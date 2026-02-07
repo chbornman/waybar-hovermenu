@@ -1,0 +1,263 @@
+use anyhow::Result;
+use serde::Serialize;
+use std::path::Path;
+use std::process::Command;
+use walkdir::WalkDir;
+
+/// JSON output format for waybar
+#[derive(Debug, Clone, Serialize)]
+pub struct ModuleStatus {
+    pub text: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub class: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tooltip: String,
+}
+
+impl ModuleStatus {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            class: String::new(),
+            tooltip: String::new(),
+        }
+    }
+
+    pub fn with_class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    pub fn with_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = tooltip.into();
+        self
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| r#"{"text":"error"}"#.to_string())
+    }
+}
+
+/// Get status for a specific module
+pub fn get_status(module: &str, pinned: bool) -> ModuleStatus {
+    let mut status = match module {
+        "audio" => get_audio_status(),
+        "bluetooth" => get_bluetooth_status(),
+        "network" => get_network_status(),
+        "cpu" => get_cpu_status(),
+        "battery" => get_battery_status(),
+        "mail" => get_mail_status(),
+        "calendar" => get_calendar_status(),
+        "localsend" => get_localsend_status(),
+        _ => ModuleStatus::new("?"),
+    };
+
+    if pinned {
+        status.class = "pinned".to_string();
+    }
+
+    status
+}
+
+fn get_audio_status() -> ModuleStatus {
+    // Get mute status
+    let muted = Command::new("pactl")
+        .args(["get-sink-mute", "@DEFAULT_SINK@"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("yes"))
+        .unwrap_or(false);
+
+    if muted {
+        return ModuleStatus::new("vol muted");
+    }
+
+    // Get volume using the vol script (handles remapping)
+    let vol_path = shellexpand::tilde("~/.local/bin/vol").to_string();
+    let volume = Command::new(&vol_path)
+        .arg("get")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "?".to_string());
+
+    ModuleStatus::new(format!("vol {}%", volume))
+}
+
+fn get_bluetooth_status() -> ModuleStatus {
+    // Check if bluetooth is powered on
+    let powered = Command::new("bluetoothctl")
+        .arg("show")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
+        .unwrap_or(false);
+
+    if !powered {
+        return ModuleStatus::new("bt off");
+    }
+
+    // Check for connected devices
+    let connected = Command::new("bluetoothctl")
+        .args(["devices", "Connected"])
+        .output()
+        .ok();
+
+    if let Some(output) = connected {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            // Line format: "Device XX:XX:XX:XX:XX:XX DeviceName"
+            if let Some(name) = line
+                .split_whitespace()
+                .skip(2)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into()
+            {
+                let name: String = name;
+                if !name.is_empty() {
+                    return ModuleStatus::new(format!("bt {}", name));
+                }
+            }
+        }
+    }
+
+    ModuleStatus::new("bt on")
+}
+
+fn get_network_status() -> ModuleStatus {
+    // Check for wifi connection
+    let wifi_output = Command::new("nmcli")
+        .args(["-t", "-f", "active,ssid", "dev", "wifi"])
+        .output()
+        .ok();
+
+    if let Some(output) = wifi_output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.starts_with("yes:") {
+                let ssid = line.strip_prefix("yes:").unwrap_or("");
+                if !ssid.is_empty() {
+                    return ModuleStatus::new(format!("wifi {}", ssid));
+                }
+            }
+        }
+    }
+
+    // Check for ethernet
+    let eth_output = Command::new("nmcli")
+        .args(["-t", "-f", "DEVICE,TYPE,STATE", "device"])
+        .output()
+        .ok();
+
+    if let Some(output) = eth_output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(":ethernet:connected") {
+                return ModuleStatus::new("eth connected");
+            }
+        }
+    }
+
+    ModuleStatus::new("wifi off")
+}
+
+fn get_cpu_status() -> ModuleStatus {
+    // Read /proc/stat for CPU usage
+    let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+
+    if let Some(cpu_line) = stat.lines().next() {
+        let parts: Vec<u64> = cpu_line
+            .split_whitespace()
+            .skip(1) // skip "cpu"
+            .filter_map(|s| s.parse().ok())
+            .collect();
+
+        if parts.len() >= 4 {
+            let user = parts[0];
+            let system = parts[2];
+            let idle = parts[3];
+            let total = user + system + idle;
+
+            if total > 0 {
+                let usage = ((user + system) * 100) / total;
+                return ModuleStatus::new(format!("cpu {}%", usage));
+            }
+        }
+    }
+
+    ModuleStatus::new("cpu ?%")
+}
+
+fn get_battery_status() -> ModuleStatus {
+    let battery_path = Path::new("/sys/class/power_supply/macsmc-battery");
+
+    let capacity = std::fs::read_to_string(battery_path.join("capacity"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "?".to_string());
+
+    let status = std::fs::read_to_string(battery_path.join("status"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let text = match status.as_str() {
+        "Charging" => format!("bat {}%+", capacity),
+        "Full" => "bat full".to_string(),
+        _ => format!("bat {}%", capacity),
+    };
+
+    ModuleStatus::new(text)
+}
+
+fn get_mail_status() -> ModuleStatus {
+    let mail_dir = shellexpand::tilde("~/.local/share/mail").to_string();
+    let mail_path = Path::new(&mail_dir);
+
+    let mut unread = 0;
+
+    if mail_path.exists() {
+        // Count files in */INBOX/new/
+        for entry in WalkDir::new(mail_path).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(parent) = path.parent() {
+                    if parent.ends_with("new") {
+                        if let Some(grandparent) = parent.parent() {
+                            if grandparent.ends_with("INBOX") {
+                                unread += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Unicode envelope
+    let envelope = "\u{f0e0}";
+
+    if unread > 0 {
+        ModuleStatus::new(format!("{} {}", envelope, unread))
+    } else {
+        ModuleStatus::new(envelope.to_string())
+    }
+}
+
+fn get_calendar_status() -> ModuleStatus {
+    // Show current date and time
+    let output = Command::new("date")
+        .args(["+%a %d %b  %H:%M"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "???".to_string());
+
+    ModuleStatus::new(output)
+}
+
+fn get_localsend_status() -> ModuleStatus {
+    ModuleStatus::new("\u{2191}\u{2193}") // ↑↓
+}
+
+/// Execute a quick action for a module
+pub fn execute_action(action: &str) -> Result<()> {
+    let expanded = shellexpand::tilde(action);
+    Command::new("sh").args(["-c", &expanded]).spawn()?;
+    Ok(())
+}

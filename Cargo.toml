@@ -1,0 +1,27 @@
+[package]
+name = "waybar-hovermenu"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "waybar-hovermenu"
+path = "src/main.rs"
+
+[[bin]]
+name = "hovermenu-ctl"
+path = "src/ctl.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+notify = "6"
+walkdir = "2"
+shellexpand = "3"
+futures = "0.3"
+libc = "0.2.180"

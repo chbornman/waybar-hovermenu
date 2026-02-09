@@ -19,6 +19,9 @@ pub struct DaemonConfig {
     pub waybar_height: u32,
     #[serde(default = "default_socket_path")]
     pub socket_path: String,
+    /// Global toggle for hover-to-open behavior. When false, menus only open/close via click.
+    #[serde(default)]
+    pub hover: bool,
 }
 
 impl Default for DaemonConfig {
@@ -27,6 +30,7 @@ impl Default for DaemonConfig {
             terminal_cmd: default_terminal_cmd(),
             waybar_height: default_waybar_height(),
             socket_path: default_socket_path(),
+            hover: false,
         }
     }
 }
@@ -129,9 +133,9 @@ impl Default for Config {
             "audio".to_string(),
             ModuleConfig {
                 enabled: true,
-                kind: "tui".to_string(),
-                command: Some("wiremix".to_string()),
-                window_class: None,
+                kind: "gui".to_string(),
+                command: Some("pavucontrol".to_string()),
+                window_class: Some("org.pulseaudio.pavucontrol".to_string()),
                 size: [600, 400],
                 position: "top-right".to_string(),
                 action: Some("pactl set-sink-mute @DEFAULT_SINK@ toggle".to_string()),

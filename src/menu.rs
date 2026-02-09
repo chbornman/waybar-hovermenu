@@ -40,13 +40,18 @@ impl MenuManager {
     }
     
     /// Check if a specific module's menu is currently open
-    async fn is_menu_open(&self, module: &str) -> bool {
+    pub async fn is_menu_open(&self, module: &str) -> bool {
         let open = self.open_module.lock().await;
         open.as_deref() == Some(module)
     }
     
-    /// Handle hover event - open menu for module (only if not already open)
+    /// Handle hover event - open menu for module (only if hover is enabled)
     pub async fn hover(self: &Arc<Self>, module: &str) -> Result<()> {
+        // No-op if hover is disabled globally
+        if !self.config.daemon.hover {
+            return Ok(());
+        }
+
         // If this module's menu is already open, do nothing
         if self.is_menu_open(module).await {
             return Ok(());
@@ -77,7 +82,13 @@ impl MenuManager {
     
     /// Handle leave event - close menu if not pinned and cursor not over menu
     /// Uses debouncing: checks multiple times over 300ms before closing
+    /// Only active when hover mode is enabled.
     pub async fn leave(&self) -> Result<()> {
+        // No-op if hover is disabled — menus are managed by click only
+        if !self.config.daemon.hover {
+            return Ok(());
+        }
+
         // Don't close if pinned
         if self.has_pinned().await {
             return Ok(());
@@ -107,46 +118,80 @@ impl MenuManager {
         Ok(())
     }
     
-    /// Handle click event - open menu if not open, toggle pin if open
+    /// Handle click event.
+    /// When hover is disabled: simple toggle — click opens, click again closes.
+    /// When hover is enabled: original pin-based behavior.
     pub async fn click(self: &Arc<Self>, module: &str) -> Result<()> {
-        let is_pinned = self.is_pinned(module).await;
         let is_open = self.is_menu_open(module).await;
-        
-        if is_pinned {
-            // Already pinned - unpin and close
-            {
-                let mut pinned = self.pinned.lock().await;
-                *pinned = None;
+
+        if !self.config.daemon.hover {
+            // Hover disabled — click is a simple open/close toggle
+            if is_open {
+                self.close_all_menus().await?;
+            } else {
+                let module_config = self.config.get_module(module)
+                    .context("Module not found")?;
+
+                if !module_config.enabled {
+                    return Ok(());
+                }
+
+                // Close any other open menu first
+                self.close_all_menus().await?;
+
+                // Open the menu (no pin, no cursor watcher)
+                self.open_menu(module, module_config).await?;
             }
-            self.close_all_menus().await?;
-        } else if is_open {
-            // Menu is open but not pinned - pin it
-            {
-                let mut pinned = self.pinned.lock().await;
-                *pinned = Some(module.to_string());
-            }
-            self.set_menu_border_gold(module).await?;
         } else {
-            // Menu not open - open it and pin it
-            let module_config = self.config.get_module(module)
-                .context("Module not found")?;
-            
-            if !module_config.enabled {
-                return Ok(());
+            // Hover enabled — original pin-based behavior
+            let is_pinned = self.is_pinned(module).await;
+
+            if is_pinned {
+                // Already pinned - unpin and close
+                {
+                    let mut pinned = self.pinned.lock().await;
+                    *pinned = None;
+                }
+                self.close_all_menus().await?;
+            } else if is_open {
+                // Menu is open but not pinned - pin it
+                {
+                    let mut pinned = self.pinned.lock().await;
+                    *pinned = Some(module.to_string());
+                }
+                self.set_menu_border_gold(module).await?;
+            } else {
+                // Menu not open - open it and pin it
+                let module_config = self.config.get_module(module)
+                    .context("Module not found")?;
+
+                if !module_config.enabled {
+                    return Ok(());
+                }
+
+                // Close any existing menu first
+                self.close_all_menus().await?;
+
+                // Open and pin
+                self.open_menu(module, module_config).await?;
+                {
+                    let mut pinned = self.pinned.lock().await;
+                    *pinned = Some(module.to_string());
+                }
+                self.set_menu_border_gold(module).await?;
             }
-            
-            // Close any existing menu first
-            self.close_all_menus().await?;
-            
-            // Open and pin
-            self.open_menu(module, module_config).await?;
-            {
-                let mut pinned = self.pinned.lock().await;
-                *pinned = Some(module.to_string());
-            }
-            self.set_menu_border_gold(module).await?;
         }
-        
+
+        // Jiggle the mouse slightly to reset waybar's click target state,
+        // allowing the same widget to be clicked again without moving the mouse.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let _ = Command::new("ydotool")
+            .args(["mousemove", "-x", "1", "-y", "0"])
+            .output();
+        let _ = Command::new("ydotool")
+            .args(["mousemove", "-x", "-1", "-y", "0"])
+            .output();
+
         Ok(())
     }
     
@@ -158,10 +203,11 @@ impl MenuManager {
         let expanded_command = shellexpand::tilde(command);
         
         if config.kind == "gui" {
-            // GUI app - just launch it
+            // GUI app - just launch it, with GTK dark theme forced
             // Use tokio::process so the child is auto-reaped (avoids zombies)
+            let gui_cmd = format!("GTK_THEME=Adwaita:dark {}", expanded_command);
             tokio::process::Command::new("sh")
-                .args(["-c", &expanded_command.to_string()])
+                .args(["-c", &gui_cmd])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -199,67 +245,77 @@ impl MenuManager {
             *open_module = Some(module.to_string());
         }
         
-        // Increment generation to cancel any previous cursor watcher
-        let generation = self.watcher_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        
-        // Spawn cursor watcher task
-        let manager = Arc::clone(self);
-        let waybar_height = self.config.daemon.waybar_height;
-        tokio::spawn(async move {
-            // Wait for window to appear
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            
-            let mut outside_count = 0;
-            const CHECKS_BEFORE_CLOSE: u32 = 5; // 500ms outside safe zone
-            loop {
-                // Check if this watcher is still valid (not superseded by a new menu)
-                if manager.watcher_generation.load(Ordering::SeqCst) != generation {
-                    debug!("Cursor watcher cancelled (new generation)");
-                    return;
-                }
-                
-                // Check if menu is pinned - if so, stop watching
-                if manager.has_pinned().await {
-                    debug!("Cursor watcher stopped (menu pinned)");
-                    return;
-                }
-                
-                // Check if menu is still open
-                if manager.open_module.lock().await.is_none() {
-                    debug!("Cursor watcher stopped (menu closed)");
-                    return;
-                }
-                
-                let (cursor_x, cursor_y) = manager.get_cursor_pos().await;
-                
-                // Safe zone: waybar area OR over menu window
-                let in_waybar = cursor_y <= waybar_height as i32;
-                let over_menu = manager.is_cursor_over_menu(cursor_x, cursor_y).await;
-                
-                tracing::debug!("Cursor at ({}, {}), in_waybar={}, over_menu={}", cursor_x, cursor_y, in_waybar, over_menu);
-                
-                if in_waybar || over_menu {
-                    // Cursor is in safe zone - reset counter
-                    outside_count = 0;
-                } else {
-                    // Cursor is outside safe zone
-                    outside_count += 1;
-                    
-                    if outside_count >= CHECKS_BEFORE_CLOSE {
-                        let _ = manager.close_all_menus().await;
+        // Only spawn cursor watcher when hover mode is enabled.
+        // In click-only mode, menus stay open until explicitly closed by another click.
+        if self.config.daemon.hover {
+            // Increment generation to cancel any previous cursor watcher
+            let generation = self.watcher_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+            // Spawn cursor watcher task
+            let manager = Arc::clone(self);
+            let waybar_height = self.config.daemon.waybar_height;
+            tokio::spawn(async move {
+                // Wait for window to appear
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+                let mut outside_count = 0;
+                const CHECKS_BEFORE_CLOSE: u32 = 5; // 500ms outside safe zone
+                loop {
+                    // Check if this watcher is still valid (not superseded by a new menu)
+                    if manager.watcher_generation.load(Ordering::SeqCst) != generation {
+                        debug!("Cursor watcher cancelled (new generation)");
                         return;
                     }
+
+                    // Check if menu is pinned - if so, stop watching
+                    if manager.has_pinned().await {
+                        debug!("Cursor watcher stopped (menu pinned)");
+                        return;
+                    }
+
+                    // Check if menu is still open
+                    if manager.open_module.lock().await.is_none() {
+                        debug!("Cursor watcher stopped (menu closed)");
+                        return;
+                    }
+
+                    let (cursor_x, cursor_y) = manager.get_cursor_pos().await;
+
+                    // Safe zone: waybar area OR over menu window
+                    let in_waybar = cursor_y <= waybar_height as i32;
+                    let over_menu = manager.is_cursor_over_menu(cursor_x, cursor_y).await;
+
+                    tracing::debug!("Cursor at ({}, {}), in_waybar={}, over_menu={}", cursor_x, cursor_y, in_waybar, over_menu);
+
+                    if in_waybar || over_menu {
+                        // Cursor is in safe zone - reset counter
+                        outside_count = 0;
+                    } else {
+                        // Cursor is outside safe zone
+                        outside_count += 1;
+
+                        if outside_count >= CHECKS_BEFORE_CLOSE {
+                            let _ = manager.close_all_menus().await;
+                            return;
+                        }
+                    }
+
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
-                
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        });
+            });
+        }
         
         Ok(())
     }
     
     /// Close all waybar menus with slide-up animation, then kill
     async fn close_all_menus(&self) -> Result<()> {
+        // Collect all GUI window classes from config
+        let gui_classes: Vec<String> = self.config.modules.values()
+            .filter(|m| m.kind == "gui")
+            .filter_map(|m| m.window_class.clone())
+            .collect();
+
         // Find all menu windows
         let output = Command::new("hyprctl")
             .args(["clients", "-j"])
@@ -287,7 +343,10 @@ impl MenuManager {
                     .unwrap_or("")
                     .to_string();
                 
-                if title.starts_with("WAYBAR-MENU:") || class == "localsend" {
+                let is_tui_menu = title.starts_with("WAYBAR-MENU:");
+                let is_gui_menu = gui_classes.iter().any(|c| c == class);
+                
+                if is_tui_menu || is_gui_menu {
                     windows.push((addr, pid));
                 }
             }
@@ -405,6 +464,11 @@ impl MenuManager {
     
     /// Check if cursor is inside any open menu window
     async fn is_cursor_over_menu(&self, cursor_x: i32, cursor_y: i32) -> bool {
+        let gui_classes: Vec<String> = self.config.modules.values()
+            .filter(|m| m.kind == "gui")
+            .filter_map(|m| m.window_class.clone())
+            .collect();
+
         let output = Command::new("hyprctl")
             .args(["clients", "-j"])
             .output()
@@ -422,7 +486,9 @@ impl MenuManager {
                             .unwrap_or("");
                         
                         // Check if this is a menu window
-                        if !title.starts_with("WAYBAR-MENU:") && class != "localsend" {
+                        let is_tui_menu = title.starts_with("WAYBAR-MENU:");
+                        let is_gui_menu = gui_classes.iter().any(|c| c == class);
+                        if !is_tui_menu && !is_gui_menu {
                             continue;
                         }
                         

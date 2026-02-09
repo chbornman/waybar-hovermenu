@@ -99,7 +99,11 @@ async fn handle_client(
                 let mut rx = status_tx.subscribe();
                 
                 // Send initial status (use spawn_blocking since get_status does blocking I/O)
-                let pinned = menu_manager.is_pinned(module).await;
+                let pinned = if config.daemon.hover {
+                    menu_manager.is_pinned(module).await
+                } else {
+                    menu_manager.is_menu_open(module).await
+                };
                 let module_owned = module.to_string();
                 let status = tokio::task::spawn_blocking(move || {
                     get_status(&module_owned, pinned)
@@ -132,7 +136,11 @@ async fn handle_client(
         "status" => {
             // One-shot status query (use spawn_blocking since get_status does blocking I/O)
             if let Some(module) = module {
-                let pinned = menu_manager.is_pinned(module).await;
+                let pinned = if config.daemon.hover {
+                    menu_manager.is_pinned(module).await
+                } else {
+                    menu_manager.is_menu_open(module).await
+                };
                 let module_owned = module.to_string();
                 let status = tokio::task::spawn_blocking(move || {
                     get_status(&module_owned, pinned)
@@ -161,9 +169,15 @@ async fn handle_client(
                 if let Err(e) = MenuManager::click(&menu_manager, module).await {
                     tracing::error!("Click error: {}", e);
                 }
-                // Broadcast status update to reflect pin state change
-                let pinned = menu_manager.is_pinned(module).await;
-                let status = get_status(module, pinned);
+                // Broadcast status update to reflect active state
+                // When hover is disabled, highlight based on menu being open
+                // When hover is enabled, highlight based on pin state
+                let highlighted = if config.daemon.hover {
+                    menu_manager.is_pinned(module).await
+                } else {
+                    menu_manager.is_menu_open(module).await
+                };
+                let status = get_status(module, highlighted);
                 let _ = status_tx.send((module.to_string(), status.to_json()));
             }
         }

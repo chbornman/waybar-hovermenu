@@ -187,7 +187,24 @@ fn get_cpu_status() -> ModuleStatus {
 }
 
 fn get_battery_status() -> ModuleStatus {
-    let battery_path = Path::new("/sys/class/power_supply/macsmc-battery");
+    // Find the first battery in /sys/class/power_supply/
+    let ps_dir = Path::new("/sys/class/power_supply");
+    let battery_path = std::fs::read_dir(ps_dir)
+        .ok()
+        .and_then(|entries| {
+            entries.filter_map(|e| e.ok()).find(|e| {
+                let type_path = e.path().join("type");
+                std::fs::read_to_string(type_path)
+                    .map(|t| t.trim().eq_ignore_ascii_case("battery"))
+                    .unwrap_or(false)
+            })
+        })
+        .map(|e| e.path());
+
+    let battery_path = match battery_path {
+        Some(p) => p,
+        None => return ModuleStatus::new("".to_string()), // no battery — hide module
+    };
 
     let capacity = std::fs::read_to_string(battery_path.join("capacity"))
         .map(|s| s.trim().to_string())

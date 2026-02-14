@@ -68,18 +68,31 @@ fn get_audio_status() -> ModuleStatus {
         .unwrap_or(false);
 
     if muted {
-        return ModuleStatus::new("vol muted");
+        return ModuleStatus::new("\u{f6a9}"); // volume-xmark
     }
 
     // Get volume using the vol script (handles remapping)
     let vol_path = shellexpand::tilde("~/.local/bin/vol").to_string();
-    let volume = Command::new(&vol_path)
+    let volume: u32 = Command::new(&vol_path)
         .arg("get")
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "?".to_string());
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
 
-    ModuleStatus::new(format!("vol {}%", volume))
+    let icon = if volume == 0 {
+        "\u{f026}" // volume-off
+    } else if volume < 50 {
+        "\u{f027}" // volume-low
+    } else {
+        "\u{f028}" // volume-high
+    };
+
+    ModuleStatus::new(format!("{} {}%", icon, volume))
 }
 
 fn get_bluetooth_status() -> ModuleStatus {
@@ -90,8 +103,10 @@ fn get_bluetooth_status() -> ModuleStatus {
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("Powered: yes"))
         .unwrap_or(false);
 
+    let bt_icon = "\u{f293}"; // bluetooth-b
+
     if !powered {
-        return ModuleStatus::new("bt off");
+        return ModuleStatus::new(format!("{} off", bt_icon));
     }
 
     // Check for connected devices
@@ -113,13 +128,13 @@ fn get_bluetooth_status() -> ModuleStatus {
             {
                 let name: String = name;
                 if !name.is_empty() {
-                    return ModuleStatus::new(format!("bt {}", name));
+                    return ModuleStatus::new(format!("{} {}", bt_icon, name));
                 }
             }
         }
     }
 
-    ModuleStatus::new("bt on")
+    ModuleStatus::new(format!("{} on", bt_icon))
 }
 
 fn get_network_status() -> ModuleStatus {
@@ -129,13 +144,16 @@ fn get_network_status() -> ModuleStatus {
         .output()
         .ok();
 
+    let wifi_icon = "\u{f1eb}"; // wifi
+    let eth_icon = "\u{f796}"; // ethernet
+
     if let Some(output) = wifi_output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             if line.starts_with("yes:") {
                 let ssid = line.strip_prefix("yes:").unwrap_or("");
                 if !ssid.is_empty() {
-                    return ModuleStatus::new(format!("wifi {}", ssid));
+                    return ModuleStatus::new(format!("{}  {}", wifi_icon, ssid));
                 }
             }
         }
@@ -151,12 +169,12 @@ fn get_network_status() -> ModuleStatus {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             if line.contains(":ethernet:connected") {
-                return ModuleStatus::new("eth connected");
+                return ModuleStatus::new(eth_icon.to_string());
             }
         }
     }
 
-    ModuleStatus::new("wifi off")
+    ModuleStatus::new(format!("{}  off", wifi_icon))
 }
 
 fn get_cpu_status() -> ModuleStatus {
@@ -178,12 +196,12 @@ fn get_cpu_status() -> ModuleStatus {
 
             if total > 0 {
                 let usage = ((user + system) * 100) / total;
-                return ModuleStatus::new(format!("cpu {}%", usage));
+                return ModuleStatus::new(format!("\u{f2db} {}%", usage)); // microchip
             }
         }
     }
 
-    ModuleStatus::new("cpu ?%")
+    ModuleStatus::new("\u{f2db} ?%") // microchip
 }
 
 fn get_battery_status() -> ModuleStatus {
@@ -214,10 +232,20 @@ fn get_battery_status() -> ModuleStatus {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "Unknown".to_string());
 
+    let cap_num: u32 = capacity.parse().unwrap_or(0);
+    let bat_icon = match status.as_str() {
+        "Charging" => "\u{f0e7}",        // bolt
+        _ if cap_num > 75 => "\u{f240}", // battery-full
+        _ if cap_num > 50 => "\u{f241}", // battery-three-quarters
+        _ if cap_num > 25 => "\u{f242}", // battery-half
+        _ if cap_num > 10 => "\u{f243}", // battery-quarter
+        _ => "\u{f244}",                 // battery-empty
+    };
+
     let text = match status.as_str() {
-        "Charging" => format!("bat {}%+", capacity),
-        "Full" => "bat full".to_string(),
-        _ => format!("bat {}%", capacity),
+        "Charging" => format!("{} {}%", bat_icon, capacity),
+        "Full" => format!("{}", bat_icon),
+        _ => format!("{} {}%", bat_icon, capacity),
     };
 
     ModuleStatus::new(text)
@@ -265,7 +293,7 @@ fn get_calendar_status() -> ModuleStatus {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "???".to_string());
 
-    ModuleStatus::new(output)
+    ModuleStatus::new(format!("\u{f073} {}", output)) // calendar
 }
 
 fn get_localsend_status() -> ModuleStatus {

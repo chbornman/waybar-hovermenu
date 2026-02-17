@@ -235,6 +235,7 @@ fn get_battery_status() -> ModuleStatus {
     let cap_num: u32 = capacity.parse().unwrap_or(0);
     let bat_icon = match status.as_str() {
         "Charging" => "\u{f0e7}",        // bolt
+        "Full" => "\u{f1e6}",            // plug
         _ if cap_num > 75 => "\u{f240}", // battery-full
         _ if cap_num > 50 => "\u{f241}", // battery-three-quarters
         _ if cap_num > 25 => "\u{f242}", // battery-half
@@ -243,8 +244,8 @@ fn get_battery_status() -> ModuleStatus {
     };
 
     let text = match status.as_str() {
+        "Full" => bat_icon.to_string(),
         "Charging" => format!("{} {}%", bat_icon, capacity),
-        "Full" => format!("{}", bat_icon),
         _ => format!("{} {}%", bat_icon, capacity),
     };
 

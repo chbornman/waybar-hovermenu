@@ -54,14 +54,13 @@ pub async fn start_watchers(
         poll_module("cpu", Duration::from_secs(interval), tx, mm).await;
     });
     
-    // Battery poller
+    // Battery watcher (UPower) + fallback poller
     let tx = status_tx.clone();
     let mm = Arc::clone(&menu_manager);
-    let interval = config.modules.get("battery")
-        .and_then(|m| m.poll_interval)
-        .unwrap_or(30);
     tokio::spawn(async move {
-        poll_module("battery", Duration::from_secs(interval), tx, mm).await;
+        if let Err(e) = watch_battery(tx, mm).await {
+            tracing::error!("Battery watcher error: {}", e);
+        }
     });
     
     // Mail watcher (inotify)
@@ -161,6 +160,36 @@ async fn watch_network(
             let _ = tx.send(("network".to_string(), status.to_json()));
         }
         
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Watch for battery changes via UPower
+async fn watch_battery(
+    tx: broadcast::Sender<(String, String)>,
+    menu_manager: Arc<MenuManager>,
+) -> Result<()> {
+    loop {
+        let mut child = TokioCommand::new("upower")
+            .args(["--monitor"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        let stdout = child.stdout.take().expect("stdout");
+        let mut reader = BufReader::new(stdout).lines();
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.contains("battery") || line.contains("line_power") || line.contains("DisplayDevice") {
+                let pinned = menu_manager.is_pinned("battery").await;
+                let status = tokio::task::spawn_blocking(move || {
+                    get_status("battery", pinned)
+                }).await.unwrap_or_else(|_| crate::modules::ModuleStatus::new("error"));
+                let _ = tx.send(("battery".to_string(), status.to_json()));
+            }
+        }
+
+        // Reconnect after a short delay if upower exits
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

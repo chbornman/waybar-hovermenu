@@ -153,7 +153,7 @@ fn get_network_status() -> ModuleStatus {
             if line.starts_with("yes:") {
                 let ssid = line.strip_prefix("yes:").unwrap_or("");
                 if !ssid.is_empty() {
-                    return ModuleStatus::new(format!("{}  {}", wifi_icon, ssid));
+                    return ModuleStatus::new(format!("{} {}", wifi_icon, ssid));
                 }
             }
         }
@@ -174,7 +174,7 @@ fn get_network_status() -> ModuleStatus {
         }
     }
 
-    ModuleStatus::new(format!("{}  off", wifi_icon))
+    ModuleStatus::new(format!("{} off", wifi_icon))
 }
 
 fn get_cpu_status() -> ModuleStatus {
@@ -289,7 +289,7 @@ fn get_mail_status() -> ModuleStatus {
 fn get_calendar_status() -> ModuleStatus {
     // Show current date and time
     let output = Command::new("date")
-        .args(["+%a %d %b  %H:%M"])
+        .args(["+%a %d %b %H:%M"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "???".to_string());

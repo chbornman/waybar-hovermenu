@@ -49,6 +49,8 @@ pub fn get_status(module: &str, pinned: bool) -> ModuleStatus {
         "mail" => get_mail_status(),
         "calendar" => get_calendar_status(),
         "localsend" => get_localsend_status(),
+        "vpn" => get_vpn_status(),
+        "surfshark" => get_surfshark_status(),
         _ => ModuleStatus::new("?"),
     };
 
@@ -138,37 +140,48 @@ fn get_bluetooth_status() -> ModuleStatus {
 }
 
 fn get_network_status() -> ModuleStatus {
-    // Check for wifi connection
-    let wifi_output = Command::new("nmcli")
-        .args(["-t", "-f", "active,ssid", "dev", "wifi"])
-        .output()
-        .ok();
-
     let wifi_icon = "\u{f1eb}"; // wifi
     let eth_icon = "\u{f796}"; // ethernet
 
+    // Check for wifi connection via iwctl
+    let wifi_output = Command::new("iwctl")
+        .args(["station", "wlan0", "show"])
+        .output()
+        .ok();
+
     if let Some(output) = wifi_output {
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut connected = false;
+        let mut ssid = String::new();
         for line in stdout.lines() {
-            if line.starts_with("yes:") {
-                let ssid = line.strip_prefix("yes:").unwrap_or("");
-                if !ssid.is_empty() {
-                    return ModuleStatus::new(format!("{} {}", wifi_icon, ssid));
-                }
+            if line.contains("State") && line.contains("connected") {
+                connected = true;
             }
+            if line.contains("Connected network") {
+                ssid = line.split_whitespace().last().unwrap_or("").to_string();
+            }
+        }
+        if connected && !ssid.is_empty() {
+            return ModuleStatus::new(format!("{} {}", wifi_icon, ssid));
         }
     }
 
-    // Check for ethernet
-    let eth_output = Command::new("nmcli")
-        .args(["-t", "-f", "DEVICE,TYPE,STATE", "device"])
+    // Check for ethernet via ip — look for physical ethernet interfaces (en*) with state UP
+    let eth_output = Command::new("ip")
+        .args(["-o", "link", "show", "up"])
         .output()
         .ok();
 
     if let Some(output) = eth_output {
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
-            if line.contains(":ethernet:connected") {
+            // Extract interface name (first field after index)
+            let iface = line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .trim_end_matches(':');
+            if iface.starts_with("en") && line.contains("state UP") {
                 return ModuleStatus::new(eth_icon.to_string());
             }
         }
@@ -299,6 +312,24 @@ fn get_calendar_status() -> ModuleStatus {
 
 fn get_localsend_status() -> ModuleStatus {
     ModuleStatus::new("\u{2191}\u{2193}") // ↑↓
+}
+
+fn get_vpn_status() -> ModuleStatus {
+    let shield_icon = "\u{f3ed}"; // shield-halved
+    let up = std::process::Command::new("ip")
+        .args(["link", "show", "wg0"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("UP"))
+        .unwrap_or(false);
+    if up {
+        ModuleStatus::new(shield_icon.to_string())
+    } else {
+        ModuleStatus::new(format!("{} off", shield_icon))
+    }
+}
+
+fn get_surfshark_status() -> ModuleStatus {
+    ModuleStatus::new("\u{f21b}") // user-secret (spy)
 }
 
 /// Execute a quick action for a module
